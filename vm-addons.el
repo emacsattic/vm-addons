@@ -5,7 +5,7 @@
 ;; Author: Noah Friedman <friedman@splode.com>
 ;; Maintainer: friedman@splode.com
 
-;; $Id: vm-addons.el,v 1.11 2005/10/29 14:30:44 friedman Exp $
+;; $Id: vm-addons.el,v 1.14 2010/11/07 20:53:48 friedman Exp $
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -18,9 +18,7 @@
 ;; GNU General Public License for more details.
 ;;
 ;; You should have received a copy of the GNU General Public License
-;; along with this program; if not, you can either send email to this
-;; program's maintainer or write to: The Free Software Foundation,
-;; Inc.; 51 Franklin Street, Fifth Floor; Boston, MA 02110-1301, USA.
+;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 ;;; Code:
@@ -50,41 +48,10 @@ This variable is used by `vma-read-forward-type'.")
   "Headers created by VM for maintaining VM state.
 These headers are purged from messages by `vma-discard-cached-data'.")
 
-(defvar vma-folder-font-lock-keywords
-  (eval-when-compile
-    (let* ((cite-chars "[>|}]")
-	   (cite-prefix "[:alpha:]")
-	   (cite-suffix (concat cite-prefix "0-9_.@-`'\"")))
-      `(("^\\(from\\|resent-from\\):\\s-+\\(.*\\)"
-         (2 font-lock-function-name-face))
-        ;("^\\(to\\|newsgroups\\):\\s-+\\(.*\\)" (2 font-lock-builtin-face))
-        ;("^\\(b?cc\\|reply-to\\):\\s-+\\(.*\\)" (2 font-lock-keyword-face))
-        ("^\\(subject:\\)[ \t]*\\(.+\\)?"
-         ;(1 font-lock-comment-face)
-         (2 font-lock-type-face nil t))
-        ;; Use MATCH-ANCHORED to effectively anchor the regexp left side.
-        (,cite-chars
-          (,(concat "\\=[ \t]*"
-                    "\\(\\([" cite-prefix "]+[" cite-suffix "]*\\)?"
-                    "\\(" cite-chars "[ \t]*\\)\\)+"
-                    "\\(.*\\)")
-           (beginning-of-line) (end-of-line)
-           (2 font-lock-constant-face nil t)
-           (4 font-lock-string-face nil t)))
-        ;("^\\(x-[a-z0-9-]+\\|in-reply-to\\):.*" . font-lock-string-face)
-        ))))
-
 ;; Used by vma-do-reply-list.
 (defvar vma-do-reply-list-called nil)
 
 
-;;;###autoload
-(defun vma-address-list->regexp (list)
-  (mapconcat 'identity (mapcar (lambda (s)
-                                 (concat "^" (glob->regexp s) "$"))
-                               list)
-             "\\|"))
-
 ;;;###autoload
 (defun vma-afa-match-format (format-str &rest match-values)
   "Creates a string of the format FORMAT-STR by getting
@@ -147,19 +114,6 @@ is more permanent.  This also affects all messages in the folder."
   (re-search-forward "^$")
   (replace-regexp "^<br>" "")
   (vm-edit-message-end))
-
-;;;###autoload
-(defun vma-folder-font-lock-setup ()
-  (make-local-variable 'font-lock-defaults)
-  (setq font-lock-defaults '(vma-folder-font-lock-keywords t))
-  (make-local-variable 'font-lock-keywords-case-fold-search)
-  (setq font-lock-keywords-case-fold-search t)
-  (font-lock-mode 1))
-
-;;;###autoload
-(defun vma-globlist->regexp (list)
-  "Convert a list of strings with shell globs into a single regexp."
-  (mapconcat 'glob->regexp list "\\|"))
 
 
 ;;; Virtual selectors
@@ -354,6 +308,17 @@ by default if `mail-citation-hook' is nil."
   (vm-mail-yank-default (car (or vm-reply-list vm-forward-list))))
 
 
+(defun vma-mime-boundary ()
+  (save-excursion
+    (save-match-data
+      (let ((mail-header-separator "")
+            contents)
+        (vma-widen-message-headers)
+        (setq contents (car (fmailutils-header-contents "Content-Type")))
+        (and (stringp contents)
+             (string-match "boundary=\"\\(.*?\\)\"" contents)
+             (match-string 1 contents))))))
+
 ;;;###autoload
 (defun vma-mime-add-final-boundary ()
   "Edit message to include final mime boundary if missing."
@@ -363,7 +328,7 @@ by default if `mail-citation-hook' is nil."
       (let* ((case-fold-search t)
              (mail-header-separator "")
              (region-beg (vma-widen-message-headers))
-             (hdr (car (fmailutils-get-header-contents "Content-Type")))
+             (hdr (car (fmailutils-header-contents "Content-Type")))
              (boundary (and (string-match "boundary=\"\\([^\"]+\\)\"" hdr)
                             (matching-substring 1 hdr)))
              (boundary-re (concat "^--" (regexp-quote boundary) "--")))
@@ -583,6 +548,115 @@ Return a marker pointing to the original start of the narrowed region."
            ;; return nil to indicate no changes.
            (narrow-to-region beg end)
            nil))))
+
+
+;; font-lock
+
+(defvar vma-folder-font-lock-citation-faces
+  '(font-lock-string-face
+    font-lock-function-name-face
+    font-lock-type-face
+    font-lock-builtin-face
+    font-lock-constant-face
+    font-lock-comment-face
+    font-lock-keyword-face
+    font-lock-warning-face
+    font-lock-variable-name-face))
+
+;; Needed by defn of vma-folder-font-lock-keywords
+(defun vma-folder-font-lock-make-citation-level (n)
+  (let* ((cite-chars "[>|}]")
+             (cite-prefix "[:alpha:]")
+             (cite-suffix "0-9_.@-`'\"")
+            ;; Nested concats used to emphasize sub-grouping
+             (citation (concat "\\(?:"
+                              (concat "\\(?:[" cite-prefix "]+[" cite-suffix "]*\\)?"
+                                      "\\(?:" cite-chars "[[:blank:]]*\\)")
+                              "\\)"))
+             (face (nth (mod (1- n) (length vma-folder-font-lock-citation-faces))
+                        vma-folder-font-lock-citation-faces)))
+
+    ;; Use MATCH-ANCHORED to effectively anchor the regexp left side.
+    `(,cite-chars
+      (,(concat "\\=[[:blank:]]*" citation "\\{" (number-to-string (1- n)) "\\}"
+                "\\(" citation ".*\\)")
+       (beginning-of-line) (end-of-line)
+       (1 ,face t)))))
+
+;; $1 contains matched header name
+;; $2 contains header contents, including any continuation lines.
+;; The length of the contents actually highlighted will tend to be limited
+;; by `jit-lock-chunk-size'.
+(defun vma-folder-make-header-font-lock-regexp (&rest headers)
+  (format "^\\(%s\\):[[:blank:]]+\\(\\(?:.+\\(?:\n[[:blank:]]\\)?\\)+\\)"
+          (mapconcat 'identity headers "\\|")))
+
+(defvar vma-folder-font-lock-keywords
+  (let* ((h 'vma-folder-make-header-font-lock-regexp))
+    `((,(funcall h "\\(?:resent-\\)?from") (2 font-lock-function-name-face))
+      ;;(,(funcall h "to" "b?cc" "newsgroups") (2 font-lock-constant-face))
+      ;;(,(funcall h "reply-to") (2 font-lock-keyword-face))
+      (,(funcall h "subject") (2 font-lock-type-face))
+
+      (vma-folder-font-lock-signature-matcher
+       (0 font-lock-comment-face t))
+
+      ,@(mapcar 'vma-folder-font-lock-make-citation-level
+                '(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15))
+      )))
+
+;; Make your known addresses stand out in recipient list so you know if the
+;; message was explicitly addressed to you.
+;; Uses `vm-multdom-user-addresses'
+(defun vma-folder-font-lock-match-me-multdom (&optional face)
+  (setq vma-folder-font-lock-keywords
+        (cons `(,(vma-folder-make-header-font-lock-regexp
+                  "\\(?:resent-\\)?\\(?:to\\|b?cc\\)")
+                (,(vm-multdom-address-list-regexp
+                   vm-multdom-user-addresses)
+                 (progn
+                   (goto-char (match-beginning 2)) ; Go to start for match
+                   (match-end 2))    ; Return end of header contents region
+                 nil
+                 (0 ,(or face 'font-lock-comment-face) t)))
+              vma-folder-font-lock-keywords)))
+
+(defun vma-signature-region ()
+  (save-excursion
+    (save-match-data
+      (let ((mail-header-separator "")
+            beg end mime-boundary)
+        (goto-char (fmailutils-body-start-position))
+        (when (or (re-search-forward "^--[ \t]*$" nil t) ;; signature
+                  (re-search-forward "^__+\r?\n[^\n]* mailing list" nil t))    ;; mailman footer
+          (setq beg (match-beginning 0))
+          (cond ((setq mime-boundary (vma-mime-boundary))
+                 (setq mime-boundary
+                       (concat "^--" (regexp-quote mime-boundary)))
+                 (if (re-search-forward mime-boundary nil t)
+                     (setq end (progn
+                                 (beginning-of-line)
+                                 (1- (point))))))))
+        (if beg
+            (list beg (or end (point-max)))
+          nil)))))
+
+(defun vma-folder-font-lock-signature-matcher (&rest ignore)
+  (let ((region (vma-signature-region)))
+    (cond ((and region
+                ;; If this region is already highlighted, don't do it
+                ;; again; that can result in an infinite loop if we're
+                ;; called again.
+                (null (plist-get (text-properties-at (car region)) 'face)))
+           (set-match-data region)
+           (goto-char (cadr region)))
+          (t nil))))
+
+;;;###autoload
+(defun vma-folder-font-lock-setup ()
+  (make-local-variable 'font-lock-defaults)
+  (setq font-lock-defaults '(vma-folder-font-lock-keywords t t))
+  (font-lock-mode 1))
 
 (provide 'vm-addons)
 
